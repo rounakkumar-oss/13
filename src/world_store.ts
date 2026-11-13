@@ -243,6 +243,8 @@ function loadBundledLiveSeed(): Partial<PersistedWorldFile> | null {
   const candidates = [
     path.join(currentDir, "data", "live_world_seed.json"),
     path.resolve(process.cwd(), "src", "data", "live_world_seed.json"),
+    path.resolve(currentDir, "..", "public", "world-seed.json"),
+    path.resolve(process.cwd(), "public", "world-seed.json"),
   ];
   for (const p of candidates) {
     try {

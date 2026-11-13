@@ -91,7 +91,10 @@ jobs:
       - name: Install dependencies & build web bundle
         run: |
           npm ci --no-audit --no-fund
-          cp -f src/data/live_world_seed.json public/world-seed.json
+          if [ -f src/data/live_world_seed.json ]; then
+            cp -f src/data/live_world_seed.json public/world-seed.json
+          fi
+          test -s public/world-seed.json
           npm run lint
           npm run build
           test -s dist/index.html
