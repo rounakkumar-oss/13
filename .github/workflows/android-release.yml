@@ -1,0 +1,154 @@
+name: Android APK Build & GitHub Release
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Version tag to publish (e.g. v1.0.0)"
+        required: false
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Setup Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK Build-Tools 36 & Platform 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
+      - name: Install dependencies & build web bundle
+        run: |
+          npm ci
+          cp -f src/data/live_world_seed.json public/world-seed.json
+          npm run lint
+          npm run build
+          test -s dist/index.html
+          test -s dist/world-seed.json
+
+      - name: Sync Capacitor Android assets
+        run: |
+          npx cap sync android
+          test -s android/app/src/main/assets/public/index.html
+
+      - name: Prepare Release Keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "${GITHUB_WORKSPACE}/android/app/release-keystore.jks"
+            echo "ANDROID_KEYSTORE_PATH=${GITHUB_WORKSPACE}/android/app/release-keystore.jks" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASSWORD=${ANDROID_KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_ALIAS=${ANDROID_KEY_ALIAS:-geminisland}" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_PASSWORD=${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
+          else
+            PASS="geminislandRelease2026"
+            keytool -genkeypair -v \
+              -keystore "${GITHUB_WORKSPACE}/android/app/release-keystore.jks" \
+              -storetype JKS \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -alias geminisland \
+              -storepass "$PASS" \
+              -keypass "$PASS" \
+              -dname "CN=GeminIsland, OU=Game, O=GeminIsland, L=Sydney, S=NSW, C=AU"
+            echo "ANDROID_KEYSTORE_PATH=${GITHUB_WORKSPACE}/android/app/release-keystore.jks" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASSWORD=${PASS}" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_ALIAS=geminisland" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_PASSWORD=${PASS}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Resolve Release Version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          elif [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          else
+            TAG="v1.0.${GITHUB_RUN_NUMBER}"
+          fi
+          CLEAN_VER="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${CLEAN_VER}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Signed Release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon \
+            -PversionCode="${{ steps.ver.outputs.version_code }}" \
+            -PversionName="${{ steps.ver.outputs.version_name }}"
+
+      - name: Verify Signed Release APK
+        id: verify_apk
+        run: |
+          APK_SRC="android/app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK_SRC"
+          SIZE=$(stat -c%s "$APK_SRC")
+          echo "APK size: $SIZE bytes"
+          test "$SIZE" -gt 1000000
+
+          unzip -l "$APK_SRC" | grep -q "AndroidManifest.xml"
+          unzip -l "$APK_SRC" | grep -q "classes.dex"
+          unzip -l "$APK_SRC" | grep -q "assets/public/index.html"
+
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK_SRC"
+
+          APK_OUT="GeminIsland-${{ steps.ver.outputs.tag }}-release.apk"
+          cp "$APK_SRC" "$APK_OUT"
+          echo "apk_file=${APK_OUT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeminIsland-release-apk
+          path: ${{ steps.verify_apk.outputs.apk_file }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release & Attach Verified APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          APK="${{ steps.verify_apk.outputs.apk_file }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            gh release create "$TAG" "$APK" \
+              --title "GeminIsland Android ${{ steps.ver.outputs.tag }}" \
+              --notes "Signed release Android APK built and verified automatically from commit ${GITHUB_SHA}."
+          fi
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fx "$APK"

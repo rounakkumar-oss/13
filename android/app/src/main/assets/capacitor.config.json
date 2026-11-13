@@ -1,0 +1,13 @@
+{
+	"appId": "com.geminisland.game",
+	"appName": "GeminIsland",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https"
+	},
+	"android": {
+		"allowMixedContent": false,
+		"backgroundColor": "#75b6d8",
+		"webContentsDebuggingEnabled": false
+	}
+}
