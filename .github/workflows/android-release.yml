@@ -2,7 +2,9 @@ name: Android APK Build & GitHub Release
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
+      - master
     tags:
       - "v*"
   workflow_dispatch:
@@ -28,7 +30,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "npm"
 
       - name: Setup Java 21 (Temurin)
         uses: actions/setup-java@v4
@@ -41,12 +42,15 @@ jobs:
 
       - name: Install Android SDK Build-Tools 36 & Platform 36
         run: |
+          set +o pipefail
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          echo "Using Android SDK root: ${SDK_ROOT}"
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
       - name: Install dependencies & build web bundle
         run: |
-          npm ci
+          npm install --no-audit --no-fund
           cp -f src/data/live_world_seed.json public/world-seed.json
           npm run lint
           npm run build
@@ -57,6 +61,7 @@ jobs:
         run: |
           npx cap sync android
           test -s android/app/src/main/assets/public/index.html
+          test -s android/app/src/main/assets/public/world-seed.json
 
       - name: Prepare Release Keystore
         env:
@@ -65,16 +70,18 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          KEYSTORE_PATH="${GITHUB_WORKSPACE}/android/app/release-keystore.jks"
           if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ]; then
-            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "${GITHUB_WORKSPACE}/android/app/release-keystore.jks"
-            echo "ANDROID_KEYSTORE_PATH=${GITHUB_WORKSPACE}/android/app/release-keystore.jks" >> "$GITHUB_ENV"
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
+            echo "ANDROID_KEYSTORE_PATH=${KEYSTORE_PATH}" >> "$GITHUB_ENV"
             echo "ANDROID_KEYSTORE_PASSWORD=${ANDROID_KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
             echo "ANDROID_KEY_ALIAS=${ANDROID_KEY_ALIAS:-geminisland}" >> "$GITHUB_ENV"
             echo "ANDROID_KEY_PASSWORD=${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
           else
             PASS="geminislandRelease2026"
+            rm -f "$KEYSTORE_PATH"
             keytool -genkeypair -v \
-              -keystore "${GITHUB_WORKSPACE}/android/app/release-keystore.jks" \
+              -keystore "$KEYSTORE_PATH" \
               -storetype JKS \
               -keyalg RSA \
               -keysize 2048 \
@@ -83,11 +90,12 @@ jobs:
               -storepass "$PASS" \
               -keypass "$PASS" \
               -dname "CN=GeminIsland, OU=Game, O=GeminIsland, L=Sydney, S=NSW, C=AU"
-            echo "ANDROID_KEYSTORE_PATH=${GITHUB_WORKSPACE}/android/app/release-keystore.jks" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PATH=${KEYSTORE_PATH}" >> "$GITHUB_ENV"
             echo "ANDROID_KEYSTORE_PASSWORD=${PASS}" >> "$GITHUB_ENV"
             echo "ANDROID_KEY_ALIAS=geminisland" >> "$GITHUB_ENV"
             echo "ANDROID_KEY_PASSWORD=${PASS}" >> "$GITHUB_ENV"
           fi
+          test -s "$KEYSTORE_PATH"
 
       - name: Resolve Release Version
         id: ver
@@ -107,6 +115,8 @@ jobs:
       - name: Build Signed Release APK
         working-directory: android
         run: |
+          test -s "$ANDROID_KEYSTORE_PATH"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon \
             -PversionCode="${{ steps.ver.outputs.version_code }}" \
@@ -124,8 +134,9 @@ jobs:
           unzip -l "$APK_SRC" | grep -q "AndroidManifest.xml"
           unzip -l "$APK_SRC" | grep -q "classes.dex"
           unzip -l "$APK_SRC" | grep -q "assets/public/index.html"
+          unzip -l "$APK_SRC" | grep -q "assets/public/world-seed.json"
 
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK_SRC"
+          "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner" verify --verbose "$APK_SRC"
 
           APK_OUT="GeminIsland-${{ steps.ver.outputs.tag }}-release.apk"
           cp "$APK_SRC" "$APK_OUT"
@@ -144,11 +155,16 @@ jobs:
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
           APK="${{ steps.verify_apk.outputs.apk_file }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK" --clobber
+          REPO="${{ github.repository }}"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --repo "$REPO" --clobber
           else
             gh release create "$TAG" "$APK" \
-              --title "GeminIsland Android ${{ steps.ver.outputs.tag }}" \
+              --repo "$REPO" \
+              --target "${{ github.sha }}" \
+              --title "GeminIsland Android ${TAG}" \
               --notes "Signed release Android APK built and verified automatically from commit ${GITHUB_SHA}."
           fi
-          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fx "$APK"
+          gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' | grep -Fx "$APK"
+          echo "Release URL: https://github.com/${REPO}/releases/tag/${TAG}"
+          echo "Direct APK URL: https://github.com/${REPO}/releases/download/${TAG}/${APK}"
