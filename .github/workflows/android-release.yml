@@ -38,15 +38,49 @@ jobs:
           java-version: "21"
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK Build-Tools 36 & Platform 36
         run: |
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK_ROOT" ] || [ ! -w "$SDK_ROOT" ]; then
+            SDK_ROOT="${HOME}/android-sdk"
+            mkdir -p "$SDK_ROOT"
+          fi
+          mkdir -p "${SDK_ROOT}/licenses"
+
+          SDKMANAGER=""
+          for candidate in \
+            "${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" \
+            "${SDK_ROOT}/cmdline-tools/bin/sdkmanager" \
+            "$(command -v sdkmanager 2>/dev/null || true)" \
+            $(find "${SDK_ROOT}/cmdline-tools" -maxdepth 3 -name sdkmanager -type f 2>/dev/null || true); do
+            if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+              SDKMANAGER="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Downloading Android command-line tools..."
+            mkdir -p "${SDK_ROOT}/cmdline-tools"
+            curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o /tmp/cmdline-tools.zip
+            unzip -q -o /tmp/cmdline-tools.zip -d "${SDK_ROOT}/cmdline-tools"
+            if [ -d "${SDK_ROOT}/cmdline-tools/cmdline-tools" ]; then
+              rm -rf "${SDK_ROOT}/cmdline-tools/latest"
+              mv "${SDK_ROOT}/cmdline-tools/cmdline-tools" "${SDK_ROOT}/cmdline-tools/latest"
+            fi
+            SDKMANAGER="${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+            chmod +x "$SDKMANAGER"
+          fi
+
+          echo "ANDROID_HOME=${SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          echo "${SDK_ROOT}/platform-tools" >> "$GITHUB_PATH"
+          echo "${SDK_ROOT}/build-tools/36.0.0" >> "$GITHUB_PATH"
+
+          echo "Using sdkmanager: ${SDKMANAGER} (SDK_ROOT=${SDK_ROOT})"
           set +o pipefail
-          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          echo "Using Android SDK root: ${SDK_ROOT}"
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Install dependencies & build web bundle
         run: |
@@ -117,6 +151,7 @@ jobs:
         run: |
           test -s "$ANDROID_KEYSTORE_PATH"
           test -n "$ANDROID_KEYSTORE_PASSWORD"
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon \
             -PversionCode="${{ steps.ver.outputs.version_code }}" \
@@ -136,7 +171,7 @@ jobs:
           unzip -l "$APK_SRC" | grep -q "assets/public/index.html"
           unzip -l "$APK_SRC" | grep -q "assets/public/world-seed.json"
 
-          "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner" verify --verbose "$APK_SRC"
+          "${ANDROID_HOME}/build-tools/36.0.0/apksigner" verify --verbose "$APK_SRC"
 
           APK_OUT="GeminIsland-${{ steps.ver.outputs.tag }}-release.apk"
           cp "$APK_SRC" "$APK_OUT"
