@@ -363,7 +363,7 @@ function updateFpsReadoutUI(fps, preset) {
     gfxFpsReadout.textContent = `${cleanFps} FPS`;
   }
   if (fpsHudVal) {
-    fpsHudVal.textContent = `${cleanFps} FPS`;
+    fpsHudVal.textContent = String(cleanFps);
   }
   if (fpsHudPreset && preset) {
     fpsHudPreset.textContent = String(preset).toUpperCase();
